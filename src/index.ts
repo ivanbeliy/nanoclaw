@@ -204,6 +204,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }, IDLE_TIMEOUT);
   };
 
+  // Reset idle timer when messages are piped to the active container.
+  // Without this, piped messages don't extend the idle window, and the
+  // _close sentinel can fire while the agent is still processing them.
+  queue.setOnMessagePiped(chatJid, resetIdleTimer);
+
   await channel.setTyping?.(chatJid, true);
   let hadError = false;
   let outputSentToUser = false;
@@ -237,6 +242,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   await channel.setTyping?.(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
+  queue.setOnMessagePiped(chatJid, () => {}); // clear callback
 
   if (output === 'error' || hadError) {
     // If we already sent output to the user, don't roll back the cursor —
@@ -451,9 +457,15 @@ async function startMessageLoop(): Promise<void> {
               { chatJid, count: messagesToSend.length },
               'Piped messages to active container',
             );
-            lastAgentTimestamp[chatJid] =
-              messagesToSend[messagesToSend.length - 1].timestamp;
-            saveState();
+            // Do NOT advance lastAgentTimestamp here. The cursor is advanced
+            // only when processGroupMessages() fetches and forwards messages.
+            // If we advance here and the container dies before processing the
+            // IPC file, the messages are lost — the next container would skip
+            // them because the cursor is already past them.
+            // The IPC file persists on disk and gets drained by the next
+            // container on startup (drainIpcInput), but processGroupMessages
+            // also re-fetches from DB, causing harmless duplicate context.
+
             // Show typing indicator while the container processes the piped message
             channel
               .setTyping?.(chatJid, true)

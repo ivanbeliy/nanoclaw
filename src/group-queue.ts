@@ -25,6 +25,7 @@ interface GroupState {
   containerName: string | null;
   groupFolder: string | null;
   retryCount: number;
+  onMessagePiped: (() => void) | null;
 }
 
 export class GroupQueue {
@@ -49,6 +50,7 @@ export class GroupQueue {
         containerName: null,
         groupFolder: null,
         retryCount: 0,
+        onMessagePiped: null,
       };
       this.groups.set(groupJid, state);
     }
@@ -154,6 +156,15 @@ export class GroupQueue {
   }
 
   /**
+   * Register a callback to be invoked when a message is piped to the container.
+   * Used by processGroupMessages to reset the idle timer on piped messages.
+   */
+  setOnMessagePiped(groupJid: string, fn: () => void): void {
+    const state = this.getGroup(groupJid);
+    state.onMessagePiped = fn;
+  }
+
+  /**
    * Send a follow-up message to the active container via IPC file.
    * Returns true if the message was written, false if no active container.
    */
@@ -171,6 +182,8 @@ export class GroupQueue {
       const tempPath = `${filepath}.tmp`;
       fs.writeFileSync(tempPath, JSON.stringify({ type: 'message', text }));
       fs.renameSync(tempPath, filepath);
+      // Notify the container owner (resets idle timer)
+      state.onMessagePiped?.();
       return true;
     } catch {
       return false;
