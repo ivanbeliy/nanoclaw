@@ -1,3 +1,4 @@
+import { execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
@@ -8,6 +9,7 @@ import { AvailableGroup } from './container-runner.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
+import { runPipeline } from './pipeline-runner.js';
 import { RegisteredGroup } from './types.js';
 
 export interface IpcDeps {
@@ -171,6 +173,15 @@ export async function processTaskIpc(
     trigger?: string;
     requiresTrigger?: boolean;
     containerConfig?: RegisteredGroup['containerConfig'];
+    // For write_system_file
+    filePath?: string;
+    content?: string;
+    // For init_project / delete_system_file
+    projectName?: string;
+    // For run_pipeline
+    pipeline?: string;
+    project?: string;
+    params?: Record<string, string>;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -445,6 +456,142 @@ export async function processTaskIpc(
         logger.warn(
           { data },
           'Invalid register_group request - missing required fields',
+        );
+      }
+      break;
+
+    case 'write_system_file':
+      // Main only — write to data/system/{filePath}
+      if (!isMain) {
+        logger.warn(
+          { sourceGroup },
+          'Unauthorized write_system_file attempt blocked',
+        );
+        break;
+      }
+      if (data.filePath && data.content !== undefined) {
+        const systemBase = path.join(DATA_DIR, 'system');
+        const fullPath = path.resolve(systemBase, data.filePath);
+        // Prevent path traversal
+        if (!fullPath.startsWith(systemBase + path.sep) && fullPath !== systemBase) {
+          logger.warn(
+            { filePath: data.filePath },
+            'Path traversal blocked in write_system_file',
+          );
+          break;
+        }
+        fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+        fs.writeFileSync(fullPath, data.content);
+        logger.info(
+          { filePath: data.filePath, sourceGroup },
+          'System file written via IPC',
+        );
+      }
+      break;
+
+    case 'delete_system_file':
+      // Main only — delete from data/system/{filePath}
+      if (!isMain) {
+        logger.warn(
+          { sourceGroup },
+          'Unauthorized delete_system_file attempt blocked',
+        );
+        break;
+      }
+      if (data.filePath) {
+        const systemBase = path.join(DATA_DIR, 'system');
+        const fullPath = path.resolve(systemBase, data.filePath);
+        if (!fullPath.startsWith(systemBase + path.sep)) {
+          logger.warn(
+            { filePath: data.filePath },
+            'Path traversal blocked in delete_system_file',
+          );
+          break;
+        }
+        if (fs.existsSync(fullPath)) {
+          fs.unlinkSync(fullPath);
+          logger.info(
+            { filePath: data.filePath, sourceGroup },
+            'System file deleted via IPC',
+          );
+        }
+      }
+      break;
+
+    case 'init_project':
+      // Main only — create a project git repo in data/projects/{name}/
+      if (!isMain) {
+        logger.warn(
+          { sourceGroup },
+          'Unauthorized init_project attempt blocked',
+        );
+        break;
+      }
+      if (data.projectName && isValidGroupFolder(data.projectName)) {
+        const projDir = path.join(DATA_DIR, 'projects', data.projectName);
+        if (!fs.existsSync(path.join(projDir, '.git'))) {
+          fs.mkdirSync(projDir, { recursive: true });
+          try {
+            execSync(
+              'git init && git config user.name "nanoclaw" && git config user.email "agent@nanoclaw.local"',
+              { cwd: projDir, stdio: 'ignore' },
+            );
+            // Set ownership for container's node user
+            try { fs.chownSync(projDir, 1000, 1000); } catch { /* ignore */ }
+            logger.info(
+              { projectName: data.projectName, sourceGroup },
+              'Project git repo initialized via IPC',
+            );
+          } catch (err) {
+            logger.warn(
+              { projectName: data.projectName, err },
+              'Failed to init project git repo',
+            );
+          }
+        } else {
+          logger.debug(
+            { projectName: data.projectName },
+            'Project git repo already exists',
+          );
+        }
+      }
+      break;
+
+    case 'run_pipeline':
+      // Main only — execute a multi-stage agent pipeline
+      if (!isMain) {
+        logger.warn(
+          { sourceGroup },
+          'Unauthorized run_pipeline attempt blocked',
+        );
+        break;
+      }
+      if (data.pipeline && data.project) {
+        const pipelineChatJid = data.chatJid || '';
+        // Run pipeline in background (don't block IPC processing)
+        runPipeline({
+          pipelineName: data.pipeline,
+          projectName: data.project,
+          params: data.params || {},
+          chatJid: pipelineChatJid,
+          onStatus: async (message) => {
+            logger.info({ pipeline: data.pipeline, project: data.project }, message);
+            // Send status updates to the chat if we have a JID and sendMessage
+            if (pipelineChatJid) {
+              try {
+                await deps.sendMessage(pipelineChatJid, `[Pipeline] ${message}`);
+              } catch { /* best-effort */ }
+            }
+          },
+        }).catch((err) => {
+          logger.error(
+            { pipeline: data.pipeline, project: data.project, err },
+            'Pipeline execution failed',
+          );
+        });
+        logger.info(
+          { pipeline: data.pipeline, project: data.project, sourceGroup },
+          'Pipeline started via IPC',
         );
       }
       break;

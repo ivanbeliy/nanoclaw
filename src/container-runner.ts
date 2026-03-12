@@ -6,6 +6,7 @@ import { ChildProcess, exec, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
+import { execSync } from 'child_process';
 import {
   CONTAINER_IMAGE,
   CONTAINER_MAX_OUTPUT_SIZE,
@@ -63,6 +64,11 @@ function buildVolumeMounts(
   const mounts: VolumeMount[] = [];
   const projectRoot = process.cwd();
   const groupDir = resolveGroupFolderPath(group.folder);
+
+  // Ensure group directory is writable by the container's node user (uid 1000).
+  // The orchestrator creates these dirs as root, but the agent runs as node
+  // and needs to write conversations, logs, etc.
+  try { fs.chownSync(groupDir, 1000, 1000); } catch { /* ignore if chown unsupported */ }
 
   if (isMain) {
     // Main gets the project root read-only. Writable paths the agent needs
@@ -122,6 +128,13 @@ function buildVolumeMounts(
     '.claude',
   );
   fs.mkdirSync(groupSessionsDir, { recursive: true });
+  // Ensure debug directory exists — Claude Agent SDK writes debug logs here
+  // and crashes with ENOENT if it's missing (the bind mount overwrites the
+  // directory created during the Docker image build)
+  const debugDir = path.join(groupSessionsDir, 'debug');
+  fs.mkdirSync(debugDir, { recursive: true });
+  // Container runs as node (uid 1000) — ensure debug dir is writable
+  try { fs.chownSync(debugDir, 1000, 1000); } catch { /* ignore if chown unsupported */ }
   const settingsFile = path.join(groupSessionsDir, 'settings.json');
   if (!fs.existsSync(settingsFile)) {
     fs.writeFileSync(
@@ -207,6 +220,46 @@ function buildVolumeMounts(
       isMain,
     );
     mounts.push(...validatedMounts);
+  }
+
+  // System layer: shared skills, roles, pipelines, bootstrap (read-only for all agents).
+  // Only the host (via IPC) can write here — agents cannot modify system-wide context.
+  const systemDir = path.join(DATA_DIR, 'system');
+  fs.mkdirSync(path.join(systemDir, 'skills'), { recursive: true });
+  fs.mkdirSync(path.join(systemDir, 'roles'), { recursive: true });
+  fs.mkdirSync(path.join(systemDir, 'pipelines'), { recursive: true });
+  try { fs.chownSync(systemDir, 1000, 1000); } catch { /* ignore */ }
+  mounts.push({
+    hostPath: systemDir,
+    containerPath: '/workspace/system',
+    readonly: true,
+  });
+
+  // Per-project git repo mount (RW — agents commit work here)
+  if (group.containerConfig?.project) {
+    const projectName = group.containerConfig.project;
+    const projDir = path.join(DATA_DIR, 'projects', projectName);
+    fs.mkdirSync(projDir, { recursive: true });
+
+    // Initialize git repo if not exists
+    if (!fs.existsSync(path.join(projDir, '.git'))) {
+      try {
+        execSync(
+          'git init && git config user.name "nanoclaw" && git config user.email "agent@nanoclaw.local"',
+          { cwd: projDir, stdio: 'ignore' },
+        );
+        logger.info({ projectName }, 'Initialized project git repo');
+      } catch (err) {
+        logger.warn({ projectName, err }, 'Failed to init project git repo');
+      }
+    }
+
+    try { fs.chownSync(projDir, 1000, 1000); } catch { /* ignore */ }
+    mounts.push({
+      hostPath: projDir,
+      containerPath: '/workspace/project',
+      readonly: false,
+    });
   }
 
   return mounts;

@@ -301,12 +301,15 @@ server.tool(
   'register_group',
   `Register a new chat/group so the agent can respond to messages there. Main group only.
 
-Use available_groups.json to find the JID for a group. The folder name must be channel-prefixed: "{channel}_{group-name}" (e.g., "whatsapp_family-chat", "telegram_dev-team", "discord_general"). Use lowercase with hyphens for the group name part.`,
+Use available_groups.json to find the JID for a group. The folder name must be channel-prefixed: "{channel}_{group-name}" (e.g., "whatsapp_family-chat", "telegram_dev-team", "discord_general"). Use lowercase with hyphens for the group name part.
+
+To assign a project to the group, pass the project name in container_config_project. The agent will get /workspace/project mounted with the project's git repo (RW). Initialize the project first with init_project.`,
   {
     jid: z.string().describe('The chat JID (e.g., "120363336345536173@g.us", "tg:-1001234567890", "dc:1234567890123456")'),
     name: z.string().describe('Display name for the group'),
     folder: z.string().describe('Channel-prefixed folder name (e.g., "whatsapp_family-chat", "telegram_dev-team")'),
     trigger: z.string().describe('Trigger word (e.g., "@Andy")'),
+    container_config_project: z.string().optional().describe('Project name to mount as /workspace/project (must be initialized with init_project first)'),
   },
   async (args) => {
     if (!isMain) {
@@ -316,7 +319,7 @@ Use available_groups.json to find the JID for a group. The folder name must be c
       };
     }
 
-    const data = {
+    const data: Record<string, unknown> = {
       type: 'register_group',
       jid: args.jid,
       name: args.name,
@@ -325,10 +328,175 @@ Use available_groups.json to find the JID for a group. The folder name must be c
       timestamp: new Date().toISOString(),
     };
 
+    if (args.container_config_project) {
+      data.containerConfig = { project: args.container_config_project };
+    }
+
     writeIpcFile(TASKS_DIR, data);
 
     return {
-      content: [{ type: 'text' as const, text: `Group "${args.name}" registered. It will start receiving messages immediately.` }],
+      content: [{ type: 'text' as const, text: `Group "${args.name}" registered${args.container_config_project ? ` with project "${args.container_config_project}"` : ''}. It will start receiving messages immediately.` }],
+    };
+  },
+);
+
+server.tool(
+  'run_pipeline',
+  `Execute a multi-stage agent pipeline. Main group only.
+Reads pipeline definition from /workspace/system/pipelines/{name}.yaml.
+
+Pipeline YAML format:
+\`\`\`yaml
+name: my-pipeline
+description: What this pipeline does
+stages:
+  - name: research
+    parallel: true    # agents in this stage run concurrently
+    agents:
+      - role: researcher    # loads role from /workspace/system/roles/researcher.md
+        prompt: "Research {topic}"  # {params} are interpolated
+        group_suffix: research-1    # unique suffix for this agent
+      - role: researcher
+        prompt: "Research {topic} from technical angle"
+        group_suffix: research-2
+  - name: synthesize        # sequential stage (waits for previous)
+    agents:
+      - role: cto
+        prompt: "Read research results and create plan"
+        group_suffix: synthesis
+\`\`\`
+
+Parallel agents use git worktrees — each gets an isolated branch, merged back after completion.
+Status updates are sent to the chat as the pipeline progresses.`,
+  {
+    pipeline: z.string().describe('Pipeline name (filename without .yaml in /workspace/system/pipelines/)'),
+    project: z.string().describe('Project name (must exist — use init_project first)'),
+    params: z.record(z.string()).optional().describe('Key-value params to interpolate in prompts (e.g., {topic} in prompt)'),
+  },
+  async (args) => {
+    if (!isMain) {
+      return {
+        content: [{ type: 'text' as const, text: 'Only the main group can run pipelines.' }],
+        isError: true,
+      };
+    }
+
+    writeIpcFile(TASKS_DIR, {
+      type: 'run_pipeline',
+      pipeline: args.pipeline,
+      project: args.project,
+      params: args.params || {},
+      chatJid,
+      timestamp: new Date().toISOString(),
+    });
+
+    return {
+      content: [{ type: 'text' as const, text: `Pipeline "${args.pipeline}" started for project "${args.project}". Status updates will be sent to this chat.` }],
+    };
+  },
+);
+
+server.tool(
+  'write_system_file',
+  `Write a file to the system layer (data/system/). Main group only.
+Use this to manage system-wide skills, roles, pipelines, and bootstrap scripts.
+
+Paths are relative to the system root. Examples:
+- "skills/research.md" — system-wide skill
+- "roles/ceo.md" — role definition
+- "pipelines/launch.yaml" — pipeline definition
+- "bootstrap.sh" — bootstrap script (runs on every container start)
+- "CLAUDE.md" — system-wide context loaded by all agents`,
+  {
+    file_path: z.string().describe('Path relative to system root (e.g., "skills/research.md")'),
+    content: z.string().describe('File content to write'),
+  },
+  async (args) => {
+    if (!isMain) {
+      return {
+        content: [{ type: 'text' as const, text: 'Only the main group can write system files.' }],
+        isError: true,
+      };
+    }
+
+    // Basic path validation
+    if (args.file_path.includes('..') || args.file_path.startsWith('/')) {
+      return {
+        content: [{ type: 'text' as const, text: 'Invalid path: must be relative and cannot contain ".."' }],
+        isError: true,
+      };
+    }
+
+    writeIpcFile(TASKS_DIR, {
+      type: 'write_system_file',
+      filePath: args.file_path,
+      content: args.content,
+      timestamp: new Date().toISOString(),
+    });
+
+    return {
+      content: [{ type: 'text' as const, text: `System file written: ${args.file_path}` }],
+    };
+  },
+);
+
+server.tool(
+  'delete_system_file',
+  'Delete a file from the system layer. Main group only.',
+  {
+    file_path: z.string().describe('Path relative to system root (e.g., "skills/old-skill.md")'),
+  },
+  async (args) => {
+    if (!isMain) {
+      return {
+        content: [{ type: 'text' as const, text: 'Only the main group can delete system files.' }],
+        isError: true,
+      };
+    }
+
+    if (args.file_path.includes('..') || args.file_path.startsWith('/')) {
+      return {
+        content: [{ type: 'text' as const, text: 'Invalid path.' }],
+        isError: true,
+      };
+    }
+
+    writeIpcFile(TASKS_DIR, {
+      type: 'delete_system_file',
+      filePath: args.file_path,
+      timestamp: new Date().toISOString(),
+    });
+
+    return {
+      content: [{ type: 'text' as const, text: `System file deletion requested: ${args.file_path}` }],
+    };
+  },
+);
+
+server.tool(
+  'init_project',
+  `Initialize a new project git repository. Main group only.
+Creates a git repo in data/projects/{name}/ that can be mounted into project agent containers.
+After initializing, register a group with containerConfig.project set to this name.`,
+  {
+    project_name: z.string().describe('Project name (alphanumeric, hyphens, underscores)'),
+  },
+  async (args) => {
+    if (!isMain) {
+      return {
+        content: [{ type: 'text' as const, text: 'Only the main group can initialize projects.' }],
+        isError: true,
+      };
+    }
+
+    writeIpcFile(TASKS_DIR, {
+      type: 'init_project',
+      projectName: args.project_name,
+      timestamp: new Date().toISOString(),
+    });
+
+    return {
+      content: [{ type: 'text' as const, text: `Project "${args.project_name}" initialization requested. Use register_group with containerConfig.project="${args.project_name}" to assign agents.` }],
     };
   },
 );

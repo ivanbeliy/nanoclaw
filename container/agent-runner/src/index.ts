@@ -373,9 +373,19 @@ async function runQuery(
     globalClaudeMd = fs.readFileSync(globalClaudeMdPath, 'utf-8');
   }
 
-  // Discover additional directories mounted at /workspace/extra/*
-  // These are passed to the SDK so their CLAUDE.md files are loaded automatically
+  // Discover additional directories for SDK to load CLAUDE.md from:
+  // 1. /workspace/system — system-wide skills, roles (all agents)
+  // 2. /workspace/project — per-project context (project agents only)
+  // 3. /workspace/extra/* — user-configured mounts (existing behavior)
   const extraDirs: string[] = [];
+
+  if (fs.existsSync('/workspace/system')) {
+    extraDirs.push('/workspace/system');
+  }
+  if (fs.existsSync('/workspace/project') && fs.readdirSync('/workspace/project').length > 0) {
+    extraDirs.push('/workspace/project');
+  }
+
   const extraBase = '/workspace/extra';
   if (fs.existsSync(extraBase)) {
     for (const entry of fs.readdirSync(extraBase)) {
@@ -490,6 +500,28 @@ async function main(): Promise<void> {
 
   let sessionId = containerInput.sessionId;
   fs.mkdirSync(IPC_INPUT_DIR, { recursive: true });
+
+  // Bootstrap: run system-level init script before any queries.
+  // /workspace/system/ is mounted read-only — only the host can modify bootstrap.sh.
+  const bootstrapScript = '/workspace/system/bootstrap.sh';
+  if (fs.existsSync(bootstrapScript)) {
+    log('Running bootstrap script...');
+    try {
+      const { execSync } = await import('child_process');
+      execSync(`bash ${bootstrapScript}`, {
+        stdio: 'inherit',
+        timeout: 30000,
+        env: {
+          ...process.env,
+          NANOCLAW_GROUP: containerInput.groupFolder,
+          NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
+        },
+      });
+      log('Bootstrap completed');
+    } catch (err) {
+      log(`Bootstrap error (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
 
   // Clean up stale _close sentinel from previous container runs
   try { fs.unlinkSync(IPC_INPUT_CLOSE_SENTINEL); } catch { /* ignore */ }
