@@ -68,7 +68,11 @@ function buildVolumeMounts(
   // Ensure group directory is writable by the container's node user (uid 1000).
   // The orchestrator creates these dirs as root, but the agent runs as node
   // and needs to write conversations, logs, etc.
-  try { fs.chownSync(groupDir, 1000, 1000); } catch { /* ignore if chown unsupported */ }
+  try {
+    fs.chownSync(groupDir, 1000, 1000);
+  } catch {
+    /* ignore if chown unsupported */
+  }
 
   if (isMain) {
     // Main gets the project root read-only. Writable paths the agent needs
@@ -134,7 +138,11 @@ function buildVolumeMounts(
   const debugDir = path.join(groupSessionsDir, 'debug');
   fs.mkdirSync(debugDir, { recursive: true });
   // Container runs as node (uid 1000) — ensure debug dir is writable
-  try { fs.chownSync(debugDir, 1000, 1000); } catch { /* ignore if chown unsupported */ }
+  try {
+    fs.chownSync(debugDir, 1000, 1000);
+  } catch {
+    /* ignore if chown unsupported */
+  }
   const settingsFile = path.join(groupSessionsDir, 'settings.json');
   if (!fs.existsSync(settingsFile)) {
     fs.writeFileSync(
@@ -228,7 +236,11 @@ function buildVolumeMounts(
   fs.mkdirSync(path.join(systemDir, 'skills'), { recursive: true });
   fs.mkdirSync(path.join(systemDir, 'roles'), { recursive: true });
   fs.mkdirSync(path.join(systemDir, 'pipelines'), { recursive: true });
-  try { fs.chownSync(systemDir, 1000, 1000); } catch { /* ignore */ }
+  try {
+    fs.chownSync(systemDir, 1000, 1000);
+  } catch {
+    /* ignore */
+  }
   mounts.push({
     hostPath: systemDir,
     containerPath: '/workspace/system',
@@ -254,7 +266,11 @@ function buildVolumeMounts(
       }
     }
 
-    try { fs.chownSync(projDir, 1000, 1000); } catch { /* ignore */ }
+    try {
+      fs.chownSync(projDir, 1000, 1000);
+    } catch {
+      /* ignore */
+    }
     mounts.push({
       hostPath: projDir,
       containerPath: '/workspace/project',
@@ -274,21 +290,20 @@ function buildContainerArgs(
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
 
-  // Route API traffic through the credential proxy (containers never see real secrets)
-  args.push(
-    '-e',
-    `ANTHROPIC_BASE_URL=http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}`,
-  );
-
-  // Mirror the host's auth method with a placeholder value.
-  // API key mode: SDK sends x-api-key, proxy replaces with real key.
-  // OAuth mode:   SDK exchanges placeholder token for temp API key,
-  //               proxy injects real OAuth token on that exchange request.
+  // Auth setup depends on the host's auth method.
   const authMode = detectAuthMode();
   if (authMode === 'api-key') {
+    // API key mode: route through credential proxy which injects real key.
+    args.push(
+      '-e',
+      `ANTHROPIC_BASE_URL=http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}`,
+    );
     args.push('-e', 'ANTHROPIC_API_KEY=placeholder');
   } else {
-    args.push('-e', 'CLAUDE_CODE_OAUTH_TOKEN=placeholder');
+    // OAuth mode: the container has real credentials in ~/.claude/.credentials.json
+    // (synced before each run). Let the SDK talk directly to the Anthropic API
+    // and handle token refresh natively. The proxy can't intercept the newer
+    // SDK's OAuth flow correctly.
   }
 
   // Runtime-specific args for host gateway resolution
@@ -329,6 +344,34 @@ export async function runContainerAgent(
   fs.mkdirSync(groupDir, { recursive: true });
 
   const mounts = buildVolumeMounts(group, input.isMain);
+
+  // For OAuth mode, sync host credentials into the container's .claude dir
+  // so the SDK can read them directly. The .claude dir is already bind-mounted.
+  if (detectAuthMode() === 'oauth') {
+    const hostCreds = path.join(
+      process.env.HOME || '/root',
+      '.claude',
+      '.credentials.json',
+    );
+    const containerCreds = path.join(
+      DATA_DIR,
+      'sessions',
+      group.folder,
+      '.claude',
+      '.credentials.json',
+    );
+    try {
+      if (fs.existsSync(hostCreds)) {
+        fs.copyFileSync(hostCreds, containerCreds);
+        // Container runs as node (uid 1000) — make the file readable
+        fs.chownSync(containerCreds, 1000, 1000);
+        fs.chmodSync(containerCreds, 0o600);
+      }
+    } catch (err) {
+      logger.warn({ err }, 'Failed to sync OAuth credentials to container');
+    }
+  }
+
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
   const containerArgs = buildContainerArgs(mounts, containerName);

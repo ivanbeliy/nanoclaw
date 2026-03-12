@@ -64,7 +64,11 @@ async function runPipelineAgent(
   const folder = `pipeline-${agent.group_suffix}`;
   const groupDir = path.join(DATA_DIR, 'sessions', folder);
   fs.mkdirSync(path.join(groupDir, '.claude', 'debug'), { recursive: true });
-  try { fs.chownSync(path.join(groupDir, '.claude'), 1000, 1000); } catch { /* ignore */ }
+  try {
+    fs.chownSync(path.join(groupDir, '.claude'), 1000, 1000);
+  } catch {
+    /* ignore */
+  }
 
   // Load role definition if specified
   let roleContext = '';
@@ -83,9 +87,10 @@ async function runPipelineAgent(
     trigger: '',
     added_at: new Date().toISOString(),
     containerConfig: {
-      project: path.basename(workDir) === path.basename(projectDir)
-        ? path.basename(projectDir)
-        : undefined,
+      project:
+        path.basename(workDir) === path.basename(projectDir)
+          ? path.basename(projectDir)
+          : undefined,
     },
   };
 
@@ -99,7 +104,9 @@ async function runPipelineAgent(
       chatJid,
       isMain: false,
     },
-    (_proc, _containerName) => { /* no queue registration for pipeline agents */ },
+    (_proc, _containerName) => {
+      /* no queue registration for pipeline agents */
+    },
     async (result) => {
       if (result.result) {
         lastResult = result.result;
@@ -156,7 +163,9 @@ export async function runPipeline(opts: PipelineRunOptions): Promise<void> {
   );
 
   for (const stage of pipeline.stages) {
-    await onStatus(`Stage: ${stage.name} (${stage.agents.length} agent${stage.agents.length > 1 ? 's' : ''}${stage.parallel ? ', parallel' : ''})`);
+    await onStatus(
+      `Stage: ${stage.name} (${stage.agents.length} agent${stage.agents.length > 1 ? 's' : ''}${stage.parallel ? ', parallel' : ''})`,
+    );
 
     if (stage.parallel && stage.agents.length > 1) {
       // Parallel execution: each agent gets a git worktree
@@ -177,13 +186,17 @@ export async function runPipeline(opts: PipelineRunOptions): Promise<void> {
               cwd: projectDir,
               stdio: 'ignore',
             });
-          } catch { /* ignore */ }
+          } catch {
+            /* ignore */
+          }
           try {
             execSync(`git branch -D "${branch}"`, {
               cwd: projectDir,
               stdio: 'ignore',
             });
-          } catch { /* ignore */ }
+          } catch {
+            /* ignore */
+          }
 
           // Create fresh worktree from current HEAD
           fs.mkdirSync(path.dirname(wtPath), { recursive: true });
@@ -223,15 +236,21 @@ export async function runPipeline(opts: PipelineRunOptions): Promise<void> {
         if (branch && wtPath !== projectDir) {
           try {
             // Add and commit any uncommitted changes in worktree
-            execSync('git add -A && git diff --cached --quiet || git commit -m "Pipeline auto-commit"', {
-              cwd: wtPath,
-              stdio: 'ignore',
-            });
+            execSync(
+              'git add -A && git diff --cached --quiet || git commit -m "Pipeline auto-commit"',
+              {
+                cwd: wtPath,
+                stdio: 'ignore',
+              },
+            );
             // Merge branch back to main
-            execSync(`git merge "${branch}" --no-edit -m "Merge ${stage.name}/${agent.group_suffix}"`, {
-              cwd: projectDir,
-              stdio: 'ignore',
-            });
+            execSync(
+              `git merge "${branch}" --no-edit -m "Merge ${stage.name}/${agent.group_suffix}"`,
+              {
+                cwd: projectDir,
+                stdio: 'ignore',
+              },
+            );
           } catch (err) {
             logger.warn(
               { agent: agent.group_suffix, err },
@@ -248,7 +267,9 @@ export async function runPipeline(opts: PipelineRunOptions): Promise<void> {
               cwd: projectDir,
               stdio: 'ignore',
             });
-          } catch { /* ignore cleanup errors */ }
+          } catch {
+            /* ignore cleanup errors */
+          }
         }
       }
     } else {
@@ -279,7 +300,9 @@ export async function runPipeline(opts: PipelineRunOptions): Promise<void> {
           `git add -A && git diff --cached --quiet || git commit -m "Stage: ${stage.name} completed"`,
           { cwd: projectDir, stdio: 'ignore' },
         );
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
     }
 
     await onStatus(`Stage "${stage.name}" completed`);

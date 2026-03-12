@@ -4,6 +4,7 @@ import path from 'path';
 import {
   ASSISTANT_NAME,
   CREDENTIAL_PROXY_PORT,
+  DATA_DIR,
   IDLE_TIMEOUT,
   POLL_INTERVAL,
   TIMEZONE,
@@ -267,7 +268,37 @@ async function runAgent(
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
   const isMain = group.isMain === true;
-  const sessionId = sessions[group.folder];
+  let sessionId: string | undefined = sessions[group.folder];
+
+  // Guard: if the session transcript is too large (>500KB), start fresh.
+  // Bloated sessions cause the SDK to hit resource limits (exit code 137).
+  if (sessionId) {
+    const sessionFile = path.join(
+      DATA_DIR,
+      'sessions',
+      group.folder,
+      '.claude',
+      'projects',
+      '-workspace-group',
+      `${sessionId}.jsonl`,
+    );
+    try {
+      const stat = fs.statSync(sessionFile);
+      if (stat.size > 500 * 1024) {
+        logger.warn(
+          {
+            group: group.name,
+            sessionId,
+            sizeKB: Math.round(stat.size / 1024),
+          },
+          'Session transcript too large, starting fresh session',
+        );
+        sessionId = undefined;
+      }
+    } catch {
+      // File doesn't exist or can't be read — that's fine, SDK handles it
+    }
+  }
 
   // Update tasks snapshot for container to read (filtered by group)
   const tasks = getAllTasks();

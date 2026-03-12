@@ -473,7 +473,10 @@ export async function processTaskIpc(
         const systemBase = path.join(DATA_DIR, 'system');
         const fullPath = path.resolve(systemBase, data.filePath);
         // Prevent path traversal
-        if (!fullPath.startsWith(systemBase + path.sep) && fullPath !== systemBase) {
+        if (
+          !fullPath.startsWith(systemBase + path.sep) &&
+          fullPath !== systemBase
+        ) {
           logger.warn(
             { filePath: data.filePath },
             'Path traversal blocked in write_system_file',
@@ -537,7 +540,11 @@ export async function processTaskIpc(
               { cwd: projDir, stdio: 'ignore' },
             );
             // Set ownership for container's node user
-            try { fs.chownSync(projDir, 1000, 1000); } catch { /* ignore */ }
+            try {
+              fs.chownSync(projDir, 1000, 1000);
+            } catch {
+              /* ignore */
+            }
             logger.info(
               { projectName: data.projectName, sourceGroup },
               'Project git repo initialized via IPC',
@@ -575,12 +582,20 @@ export async function processTaskIpc(
           params: data.params || {},
           chatJid: pipelineChatJid,
           onStatus: async (message) => {
-            logger.info({ pipeline: data.pipeline, project: data.project }, message);
+            logger.info(
+              { pipeline: data.pipeline, project: data.project },
+              message,
+            );
             // Send status updates to the chat if we have a JID and sendMessage
             if (pipelineChatJid) {
               try {
-                await deps.sendMessage(pipelineChatJid, `[Pipeline] ${message}`);
-              } catch { /* best-effort */ }
+                await deps.sendMessage(
+                  pipelineChatJid,
+                  `[Pipeline] ${message}`,
+                );
+              } catch {
+                /* best-effort */
+              }
             }
           },
         }).catch((err) => {
