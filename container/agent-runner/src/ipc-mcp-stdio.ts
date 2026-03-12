@@ -371,7 +371,7 @@ Status updates are sent to the chat as the pipeline progresses.`,
   {
     pipeline: z.string().describe('Pipeline name (filename without .yaml in /workspace/system/pipelines/)'),
     project: z.string().describe('Project name (must exist — use init_project first)'),
-    params: z.record(z.string()).optional().describe('Key-value params to interpolate in prompts (e.g., {topic} in prompt)'),
+    params: z.record(z.string(), z.string()).optional().describe('Key-value params to interpolate in prompts (e.g., {topic} in prompt)'),
   },
   async (args) => {
     if (!isMain) {
