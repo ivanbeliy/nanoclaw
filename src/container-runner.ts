@@ -376,7 +376,9 @@ export async function runContainerAgent(
               bestCredsPath = filePath;
             }
           }
-        } catch { /* skip unreadable files */ }
+        } catch {
+          /* skip unreadable files */
+        }
       };
 
       // Check host credentials
@@ -386,7 +388,12 @@ export async function runContainerAgent(
       const sessionsDir = path.join(DATA_DIR, 'sessions');
       if (fs.existsSync(sessionsDir)) {
         for (const sessionFolder of fs.readdirSync(sessionsDir)) {
-          const sessionCredFile = path.join(sessionsDir, sessionFolder, '.claude', '.credentials.json');
+          const sessionCredFile = path.join(
+            sessionsDir,
+            sessionFolder,
+            '.claude',
+            '.credentials.json',
+          );
           checkCreds(sessionCredFile);
         }
       }
@@ -400,8 +407,13 @@ export async function runContainerAgent(
         if (bestCredsPath !== hostCreds) {
           try {
             fs.copyFileSync(bestCredsPath, hostCreds);
-            logger.info({ source: bestCredsPath }, 'Synced fresher OAuth credentials back to host');
-          } catch { /* host path may not be writable */ }
+            logger.info(
+              { source: bestCredsPath },
+              'Synced fresher OAuth credentials back to host',
+            );
+          } catch {
+            /* host path may not be writable */
+          }
         }
         fs.chownSync(containerCreds, 1000, 1000);
         fs.chmodSync(containerCreds, 0o600);

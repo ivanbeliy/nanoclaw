@@ -19,7 +19,10 @@ const LOCK_FILE = path.join(DATA_DIR, 'nanoclaw.pid');
 export function acquirePidLock(): boolean {
   try {
     if (fs.existsSync(LOCK_FILE)) {
-      const existingPid = parseInt(fs.readFileSync(LOCK_FILE, 'utf-8').trim(), 10);
+      const existingPid = parseInt(
+        fs.readFileSync(LOCK_FILE, 'utf-8').trim(),
+        10,
+      );
       if (!isNaN(existingPid) && isProcessRunning(existingPid)) {
         logger.error(
           { existingPid, lockFile: LOCK_FILE },

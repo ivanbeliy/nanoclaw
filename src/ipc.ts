@@ -4,7 +4,12 @@ import path from 'path';
 
 import { CronExpressionParser } from 'cron-parser';
 
-import { DATA_DIR, IPC_POLL_INTERVAL, RCLONE_CONF_PATH, TIMEZONE } from './config.js';
+import {
+  DATA_DIR,
+  IPC_POLL_INTERVAL,
+  RCLONE_CONF_PATH,
+  TIMEZONE,
+} from './config.js';
 import { AvailableGroup } from './container-runner.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
@@ -577,11 +582,12 @@ export async function processTaskIpc(
         pipelineProject = data.project;
       } else {
         // Non-main: ignore data.project, use the group's assigned project
-        const groupEntry = registeredGroups[
-          Object.keys(registeredGroups).find(
-            (jid) => registeredGroups[jid].folder === sourceGroup,
-          ) || ''
-        ];
+        const groupEntry =
+          registeredGroups[
+            Object.keys(registeredGroups).find(
+              (jid) => registeredGroups[jid].folder === sourceGroup,
+            ) || ''
+          ];
         pipelineProject = groupEntry?.containerConfig?.project;
         if (!pipelineProject) {
           logger.warn(
@@ -640,7 +646,9 @@ export async function processTaskIpc(
       if (!fs.existsSync(RCLONE_CONF_PATH)) {
         fs.writeFileSync(
           responseFile,
-          JSON.stringify({ error: 'GDrive not configured. rclone.conf missing on host.' }),
+          JSON.stringify({
+            error: 'GDrive not configured. rclone.conf missing on host.',
+          }),
         );
         break;
       }
@@ -666,7 +674,9 @@ export async function processTaskIpc(
       if (!fs.existsSync(RCLONE_CONF_PATH)) {
         fs.writeFileSync(
           responseFile,
-          JSON.stringify({ error: 'GDrive not configured. rclone.conf missing on host.' }),
+          JSON.stringify({
+            error: 'GDrive not configured. rclone.conf missing on host.',
+          }),
         );
         break;
       }
@@ -674,17 +684,25 @@ export async function processTaskIpc(
       const groupDir = resolveGroupFolderPath(sourceGroup);
       const localTarget = path.resolve(groupDir, data.localFile);
       // Path traversal check
-      if (!localTarget.startsWith(groupDir + path.sep) && localTarget !== groupDir) {
+      if (
+        !localTarget.startsWith(groupDir + path.sep) &&
+        localTarget !== groupDir
+      ) {
         fs.writeFileSync(
           responseFile,
-          JSON.stringify({ error: 'Invalid local path: must be within group directory' }),
+          JSON.stringify({
+            error: 'Invalid local path: must be within group directory',
+          }),
         );
         break;
       }
       try {
         fs.mkdirSync(path.dirname(localTarget), { recursive: true });
         await downloadFile(data.remotePath, localTarget);
-        fs.writeFileSync(responseFile, JSON.stringify({ result: { downloaded: data.localFile } }));
+        fs.writeFileSync(
+          responseFile,
+          JSON.stringify({ result: { downloaded: data.localFile } }),
+        );
       } catch (err) {
         fs.writeFileSync(
           responseFile,
@@ -704,17 +722,24 @@ export async function processTaskIpc(
       if (!fs.existsSync(RCLONE_CONF_PATH)) {
         fs.writeFileSync(
           responseFile,
-          JSON.stringify({ error: 'GDrive not configured. rclone.conf missing on host.' }),
+          JSON.stringify({
+            error: 'GDrive not configured. rclone.conf missing on host.',
+          }),
         );
         break;
       }
       // Resolve local path from the group's directory on host
       const groupDir = resolveGroupFolderPath(sourceGroup);
       const localSource = path.resolve(groupDir, data.localFile);
-      if (!localSource.startsWith(groupDir + path.sep) && localSource !== groupDir) {
+      if (
+        !localSource.startsWith(groupDir + path.sep) &&
+        localSource !== groupDir
+      ) {
         fs.writeFileSync(
           responseFile,
-          JSON.stringify({ error: 'Invalid local path: must be within group directory' }),
+          JSON.stringify({
+            error: 'Invalid local path: must be within group directory',
+          }),
         );
         break;
       }
@@ -727,7 +752,10 @@ export async function processTaskIpc(
       }
       try {
         await uploadFile(localSource, data.remotePath);
-        fs.writeFileSync(responseFile, JSON.stringify({ result: { uploaded: data.remotePath } }));
+        fs.writeFileSync(
+          responseFile,
+          JSON.stringify({ result: { uploaded: data.remotePath } }),
+        );
       } catch (err) {
         fs.writeFileSync(
           responseFile,

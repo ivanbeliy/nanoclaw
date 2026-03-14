@@ -76,20 +76,12 @@ function resolvePipelinePath(
 /**
  * Resolve a role definition path: group-local first, then system-wide.
  */
-function resolveRolePath(
-  name: string,
-  sourceGroup?: string,
-): string | null {
+function resolveRolePath(name: string, sourceGroup?: string): string | null {
   if (!SAFE_NAME_PATTERN.test(name)) return null;
 
   // Check group-local roles first
   if (sourceGroup) {
-    const groupPath = path.join(
-      GROUPS_DIR,
-      sourceGroup,
-      'roles',
-      `${name}.md`,
-    );
+    const groupPath = path.join(GROUPS_DIR, sourceGroup, 'roles', `${name}.md`);
     if (fs.existsSync(groupPath)) return groupPath;
   }
 

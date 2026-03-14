@@ -514,8 +514,14 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   process.on('exit', releasePidLock);
-  process.on('SIGTERM', () => { releasePidLock(); process.exit(0); });
-  process.on('SIGINT', () => { releasePidLock(); process.exit(0); });
+  process.on('SIGTERM', () => {
+    releasePidLock();
+    process.exit(0);
+  });
+  process.on('SIGINT', () => {
+    releasePidLock();
+    process.exit(0);
+  });
 
   ensureContainerSystemRunning();
   initDatabase();
