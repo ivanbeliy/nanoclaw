@@ -10,6 +10,7 @@ import { z } from 'zod';
 import fs from 'fs';
 import path from 'path';
 import { CronExpressionParser } from 'cron-parser';
+import { parse as parseYaml } from 'yaml';
 
 const IPC_DIR = '/workspace/ipc';
 const MESSAGES_DIR = path.join(IPC_DIR, 'messages');
@@ -342,8 +343,10 @@ To assign a project to the group, pass the project name in container_config_proj
 
 server.tool(
   'run_pipeline',
-  `Execute a multi-stage agent pipeline. Main group only.
-Reads pipeline definition from /workspace/system/pipelines/{name}.yaml.
+  `Execute a multi-stage agent pipeline.
+Reads pipeline definition from /workspace/group/pipelines/{name}.yaml (group-local) or /workspace/system/pipelines/{name}.yaml (system-wide). Group-local pipelines take priority.
+
+Main group: can specify any project. Non-main groups: automatically use the group's assigned project.
 
 Pipeline YAML format:
 \`\`\`yaml
@@ -353,7 +356,7 @@ stages:
   - name: research
     parallel: true    # agents in this stage run concurrently
     agents:
-      - role: researcher    # loads role from /workspace/system/roles/researcher.md
+      - role: researcher    # loads role from roles/researcher.md (group-local or system)
         prompt: "Research {topic}"  # {params} are interpolated
         group_suffix: research-1    # unique suffix for this agent
       - role: researcher
@@ -369,29 +372,119 @@ stages:
 Parallel agents use git worktrees — each gets an isolated branch, merged back after completion.
 Status updates are sent to the chat as the pipeline progresses.`,
   {
-    pipeline: z.string().describe('Pipeline name (filename without .yaml in /workspace/system/pipelines/)'),
-    project: z.string().describe('Project name (must exist — use init_project first)'),
+    pipeline: z.string().describe('Pipeline name (filename without .yaml)'),
+    project: z.string().optional().describe('Project name (main group only — non-main uses assigned project)'),
     params: z.record(z.string(), z.string()).optional().describe('Key-value params to interpolate in prompts (e.g., {topic} in prompt)'),
   },
   async (args) => {
-    if (!isMain) {
+    // Validate pipeline name
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(args.pipeline)) {
       return {
-        content: [{ type: 'text' as const, text: 'Only the main group can run pipelines.' }],
+        content: [{ type: 'text' as const, text: 'Invalid pipeline name. Use alphanumeric characters, hyphens, and underscores only.' }],
         isError: true,
       };
     }
 
-    writeIpcFile(TASKS_DIR, {
+    const data: Record<string, unknown> = {
       type: 'run_pipeline',
       pipeline: args.pipeline,
-      project: args.project,
       params: args.params || {},
       chatJid,
       timestamp: new Date().toISOString(),
-    });
+    };
+
+    // Main sends project explicitly; non-main omits it (host resolves from config)
+    if (isMain) {
+      if (!args.project) {
+        return {
+          content: [{ type: 'text' as const, text: 'Main group must specify a project name.' }],
+          isError: true,
+        };
+      }
+      data.project = args.project;
+    }
+
+    writeIpcFile(TASKS_DIR, data);
+
+    const projectLabel = isMain ? args.project : '(assigned project)';
+    return {
+      content: [{ type: 'text' as const, text: `Pipeline "${args.pipeline}" started for project "${projectLabel}". Status updates will be sent to this chat.` }],
+    };
+  },
+);
+
+server.tool(
+  'write_pipeline',
+  `Write a pipeline YAML definition to your group's local pipelines directory.
+The pipeline will be available to run_pipeline for this group. Group-local pipelines take priority over system pipelines.
+
+Pipeline YAML must contain at minimum: name, stages (with name, agents).`,
+  {
+    name: z.string().describe('Pipeline name (alphanumeric, hyphens, underscores)'),
+    content: z.string().describe('Pipeline YAML content'),
+  },
+  async (args) => {
+    // Validate name
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(args.name)) {
+      return {
+        content: [{ type: 'text' as const, text: 'Invalid pipeline name. Use alphanumeric characters, hyphens, and underscores only (1-64 chars).' }],
+        isError: true,
+      };
+    }
+
+    // Validate YAML structure
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = parseYaml(args.content);
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: `Invalid YAML: ${err instanceof Error ? err.message : String(err)}` }],
+        isError: true,
+      };
+    }
+
+    if (!parsed || typeof parsed !== 'object' || !parsed.name || !parsed.stages) {
+      return {
+        content: [{ type: 'text' as const, text: 'Pipeline YAML must contain "name" and "stages" fields.' }],
+        isError: true,
+      };
+    }
+
+    const pipelinesDir = '/workspace/group/pipelines';
+    fs.mkdirSync(pipelinesDir, { recursive: true });
+    const filePath = path.join(pipelinesDir, `${args.name}.yaml`);
+    fs.writeFileSync(filePath, args.content);
 
     return {
-      content: [{ type: 'text' as const, text: `Pipeline "${args.pipeline}" started for project "${args.project}". Status updates will be sent to this chat.` }],
+      content: [{ type: 'text' as const, text: `Pipeline "${args.name}" written to ${filePath}` }],
+    };
+  },
+);
+
+server.tool(
+  'write_role',
+  `Write a role definition to your group's local roles directory.
+The role will be available for use in pipeline agents. Group-local roles take priority over system roles.`,
+  {
+    name: z.string().describe('Role name (alphanumeric, hyphens, underscores)'),
+    content: z.string().describe('Role definition content (markdown)'),
+  },
+  async (args) => {
+    // Validate name
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(args.name)) {
+      return {
+        content: [{ type: 'text' as const, text: 'Invalid role name. Use alphanumeric characters, hyphens, and underscores only (1-64 chars).' }],
+        isError: true,
+      };
+    }
+
+    const rolesDir = '/workspace/group/roles';
+    fs.mkdirSync(rolesDir, { recursive: true });
+    const filePath = path.join(rolesDir, `${args.name}.md`);
+    fs.writeFileSync(filePath, args.content);
+
+    return {
+      content: [{ type: 'text' as const, text: `Role "${args.name}" written to ${filePath}` }],
     };
   },
 );
@@ -497,6 +590,148 @@ After initializing, register a group with containerConfig.project set to this na
 
     return {
       content: [{ type: 'text' as const, text: `Project "${args.project_name}" initialization requested. Use register_group with containerConfig.project="${args.project_name}" to assign agents.` }],
+    };
+  },
+);
+
+// --- GDrive tools (host-side proxy via IPC) ---
+
+const RESPONSES_DIR = path.join(IPC_DIR, 'responses');
+
+/**
+ * Write an IPC task and poll for the host's response.
+ */
+async function ipcRequestResponse(
+  taskData: Record<string, unknown>,
+  timeoutMs = 30000,
+): Promise<{ result?: unknown; error?: string }> {
+  const responseId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  writeIpcFile(TASKS_DIR, { ...taskData, responseId });
+
+  const responseFile = path.join(RESPONSES_DIR, `${responseId}.json`);
+  const deadline = Date.now() + timeoutMs;
+  const pollInterval = 500;
+
+  while (Date.now() < deadline) {
+    if (fs.existsSync(responseFile)) {
+      const data = JSON.parse(fs.readFileSync(responseFile, 'utf-8'));
+      // Clean up response file
+      try {
+        fs.unlinkSync(responseFile);
+      } catch { /* ignore */ }
+      return data;
+    }
+    await new Promise((resolve) => setTimeout(resolve, pollInterval));
+  }
+
+  return { error: 'Request timed out waiting for host response' };
+}
+
+server.tool(
+  'gdrive_list',
+  `List files and folders on Google Drive. Available to all groups.
+Returns a JSON list of files with path, size, modification time, and whether it's a directory.`,
+  {
+    path: z.string().default('').describe('Remote path on Google Drive (e.g., "Documents/reports" or "" for root)'),
+  },
+  async (args) => {
+    const response = await ipcRequestResponse({
+      type: 'gdrive_list',
+      remotePath: args.path,
+      timestamp: new Date().toISOString(),
+    });
+
+    if (response.error) {
+      return {
+        content: [{ type: 'text' as const, text: `GDrive list error: ${response.error}` }],
+        isError: true,
+      };
+    }
+
+    return {
+      content: [{ type: 'text' as const, text: JSON.stringify(response.result, null, 2) }],
+    };
+  },
+);
+
+server.tool(
+  'gdrive_download',
+  `Download a file from Google Drive to the group's local directory.
+The file will be available at /workspace/group/{local_file}.`,
+  {
+    remote_path: z.string().describe('Path on Google Drive (e.g., "Documents/report.pdf")'),
+    local_file: z.string().describe('Local filename relative to /workspace/group/ (e.g., "downloads/report.pdf")'),
+  },
+  async (args) => {
+    // Basic validation
+    if (args.local_file.includes('..') || args.local_file.startsWith('/')) {
+      return {
+        content: [{ type: 'text' as const, text: 'Invalid local_file: must be relative and cannot contain ".."' }],
+        isError: true,
+      };
+    }
+
+    const response = await ipcRequestResponse({
+      type: 'gdrive_download',
+      remotePath: args.remote_path,
+      localFile: args.local_file,
+      timestamp: new Date().toISOString(),
+    });
+
+    if (response.error) {
+      return {
+        content: [{ type: 'text' as const, text: `GDrive download error: ${response.error}` }],
+        isError: true,
+      };
+    }
+
+    return {
+      content: [{ type: 'text' as const, text: `Downloaded to /workspace/group/${args.local_file}` }],
+    };
+  },
+);
+
+server.tool(
+  'gdrive_upload',
+  `Upload a file from the group's local directory to Google Drive.
+The file must exist at /workspace/group/{local_file}.`,
+  {
+    local_file: z.string().describe('Local filename relative to /workspace/group/ (e.g., "output/report.pdf")'),
+    remote_path: z.string().describe('Destination path on Google Drive (e.g., "Reports/weekly-report.pdf")'),
+  },
+  async (args) => {
+    if (args.local_file.includes('..') || args.local_file.startsWith('/')) {
+      return {
+        content: [{ type: 'text' as const, text: 'Invalid local_file: must be relative and cannot contain ".."' }],
+        isError: true,
+      };
+    }
+
+    // Check file exists locally
+    const localPath = path.join('/workspace/group', args.local_file);
+    if (!fs.existsSync(localPath)) {
+      return {
+        content: [{ type: 'text' as const, text: `File not found: /workspace/group/${args.local_file}` }],
+        isError: true,
+      };
+    }
+
+    const response = await ipcRequestResponse({
+      type: 'gdrive_upload',
+      localFile: args.local_file,
+      remotePath: args.remote_path,
+      timestamp: new Date().toISOString(),
+    });
+
+    if (response.error) {
+      return {
+        content: [{ type: 'text' as const, text: `GDrive upload error: ${response.error}` }],
+        isError: true,
+      };
+    }
+
+    return {
+      content: [{ type: 'text' as const, text: `Uploaded to gdrive:${args.remote_path}` }],
     };
   },
 );

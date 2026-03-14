@@ -16,6 +16,9 @@ Single Node.js process with skill-based channel system. Channels (WhatsApp, Tele
 | `src/router.ts` | Message formatting and outbound routing |
 | `src/config.ts` | Trigger pattern, paths, intervals |
 | `src/container-runner.ts` | Spawns agent containers with mounts |
+| `src/pipeline-runner.ts` | Multi-stage agent pipelines (group-local + system) |
+| `src/gdrive.ts` | Host-side GDrive proxy (rclone with mutex) |
+| `src/pidlock.ts` | PID lock to prevent duplicate instances |
 | `src/task-scheduler.ts` | Runs scheduled tasks |
 | `src/db.ts` | SQLite operations |
 | `groups/{name}/CLAUDE.md` | Per-group memory (isolated) |
@@ -50,10 +53,12 @@ launchctl unload ~/Library/LaunchAgents/com.nanoclaw.plist
 launchctl kickstart -k gui/$(id -u)/com.nanoclaw  # restart
 
 # Linux (systemd)
-systemctl --user start nanoclaw
-systemctl --user stop nanoclaw
-systemctl --user restart nanoclaw
+systemctl start nanoclaw       # or --user if user-level
+systemctl stop nanoclaw
+systemctl restart nanoclaw     # ALWAYS use this to restart
 ```
+
+**IMPORTANT:** Never restart NanoClaw by manually killing the process and running `node dist/index.js`. The systemd service has `Restart=always`, so killing the process triggers auto-restart. A manual `nohup node ...` then creates a **second instance** — both fight over containers (exit code 137 loop). Always use `systemctl restart nanoclaw`. A PID lock file (`data/nanoclaw.pid`) guards against this, but using systemctl is the correct approach.
 
 ## Troubleshooting
 

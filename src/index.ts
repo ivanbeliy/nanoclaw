@@ -27,6 +27,7 @@ import {
   ensureContainerRuntimeRunning,
   PROXY_BIND_HOST,
 } from './container-runtime.js';
+import { acquirePidLock, releasePidLock } from './pidlock.js';
 import {
   getAllChats,
   getAllRegisteredGroups,
@@ -509,6 +510,13 @@ function ensureContainerSystemRunning(): void {
 }
 
 async function main(): Promise<void> {
+  if (!acquirePidLock()) {
+    process.exit(1);
+  }
+  process.on('exit', releasePidLock);
+  process.on('SIGTERM', () => { releasePidLock(); process.exit(0); });
+  process.on('SIGINT', () => { releasePidLock(); process.exit(0); });
+
   ensureContainerSystemRunning();
   initDatabase();
   logger.info('Database initialized');

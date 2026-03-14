@@ -4,11 +4,13 @@ import path from 'path';
 
 import { CronExpressionParser } from 'cron-parser';
 
-import { DATA_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
+import { DATA_DIR, IPC_POLL_INTERVAL, RCLONE_CONF_PATH, TIMEZONE } from './config.js';
 import { AvailableGroup } from './container-runner.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
+import { downloadFile, listFiles, uploadFile } from './gdrive.js';
+import { resolveGroupFolderPath } from './group-folder.js';
 import { runPipeline } from './pipeline-runner.js';
 import { RegisteredGroup } from './types.js';
 
@@ -182,6 +184,10 @@ export async function processTaskIpc(
     pipeline?: string;
     project?: string;
     params?: Record<string, string>;
+    // For gdrive_* operations
+    remotePath?: string;
+    localFile?: string;
+    responseId?: string;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -564,26 +570,40 @@ export async function processTaskIpc(
       }
       break;
 
-    case 'run_pipeline':
-      // Main only — execute a multi-stage agent pipeline
-      if (!isMain) {
-        logger.warn(
-          { sourceGroup },
-          'Unauthorized run_pipeline attempt blocked',
-        );
-        break;
+    case 'run_pipeline': {
+      // Determine project name: main uses data.project, non-main uses assigned project
+      let pipelineProject: string | undefined;
+      if (isMain) {
+        pipelineProject = data.project;
+      } else {
+        // Non-main: ignore data.project, use the group's assigned project
+        const groupEntry = registeredGroups[
+          Object.keys(registeredGroups).find(
+            (jid) => registeredGroups[jid].folder === sourceGroup,
+          ) || ''
+        ];
+        pipelineProject = groupEntry?.containerConfig?.project;
+        if (!pipelineProject) {
+          logger.warn(
+            { sourceGroup },
+            'run_pipeline blocked: non-main group has no assigned project',
+          );
+          break;
+        }
       }
-      if (data.pipeline && data.project) {
+
+      if (data.pipeline && pipelineProject) {
         const pipelineChatJid = data.chatJid || '';
         // Run pipeline in background (don't block IPC processing)
         runPipeline({
           pipelineName: data.pipeline,
-          projectName: data.project,
+          projectName: pipelineProject,
           params: data.params || {},
           chatJid: pipelineChatJid,
+          sourceGroup: isMain ? undefined : sourceGroup,
           onStatus: async (message) => {
             logger.info(
-              { pipeline: data.pipeline, project: data.project },
+              { pipeline: data.pipeline, project: pipelineProject },
               message,
             );
             // Send status updates to the chat if we have a JID and sendMessage
@@ -600,16 +620,124 @@ export async function processTaskIpc(
           },
         }).catch((err) => {
           logger.error(
-            { pipeline: data.pipeline, project: data.project, err },
+            { pipeline: data.pipeline, project: pipelineProject, err },
             'Pipeline execution failed',
           );
         });
         logger.info(
-          { pipeline: data.pipeline, project: data.project, sourceGroup },
+          { pipeline: data.pipeline, project: pipelineProject, sourceGroup },
           'Pipeline started via IPC',
         );
       }
       break;
+    }
+
+    case 'gdrive_list': {
+      if (!data.responseId) break;
+      const responseDir = path.join(DATA_DIR, 'ipc', sourceGroup, 'responses');
+      fs.mkdirSync(responseDir, { recursive: true });
+      const responseFile = path.join(responseDir, `${data.responseId}.json`);
+      if (!fs.existsSync(RCLONE_CONF_PATH)) {
+        fs.writeFileSync(
+          responseFile,
+          JSON.stringify({ error: 'GDrive not configured. rclone.conf missing on host.' }),
+        );
+        break;
+      }
+      try {
+        const result = await listFiles(data.remotePath || '');
+        fs.writeFileSync(responseFile, JSON.stringify({ result }));
+      } catch (err) {
+        fs.writeFileSync(
+          responseFile,
+          JSON.stringify({
+            error: err instanceof Error ? err.message : String(err),
+          }),
+        );
+      }
+      break;
+    }
+
+    case 'gdrive_download': {
+      if (!data.responseId || !data.remotePath || !data.localFile) break;
+      const responseDir = path.join(DATA_DIR, 'ipc', sourceGroup, 'responses');
+      fs.mkdirSync(responseDir, { recursive: true });
+      const responseFile = path.join(responseDir, `${data.responseId}.json`);
+      if (!fs.existsSync(RCLONE_CONF_PATH)) {
+        fs.writeFileSync(
+          responseFile,
+          JSON.stringify({ error: 'GDrive not configured. rclone.conf missing on host.' }),
+        );
+        break;
+      }
+      // Resolve local path to the group's directory on host
+      const groupDir = resolveGroupFolderPath(sourceGroup);
+      const localTarget = path.resolve(groupDir, data.localFile);
+      // Path traversal check
+      if (!localTarget.startsWith(groupDir + path.sep) && localTarget !== groupDir) {
+        fs.writeFileSync(
+          responseFile,
+          JSON.stringify({ error: 'Invalid local path: must be within group directory' }),
+        );
+        break;
+      }
+      try {
+        fs.mkdirSync(path.dirname(localTarget), { recursive: true });
+        await downloadFile(data.remotePath, localTarget);
+        fs.writeFileSync(responseFile, JSON.stringify({ result: { downloaded: data.localFile } }));
+      } catch (err) {
+        fs.writeFileSync(
+          responseFile,
+          JSON.stringify({
+            error: err instanceof Error ? err.message : String(err),
+          }),
+        );
+      }
+      break;
+    }
+
+    case 'gdrive_upload': {
+      if (!data.responseId || !data.remotePath || !data.localFile) break;
+      const responseDir = path.join(DATA_DIR, 'ipc', sourceGroup, 'responses');
+      fs.mkdirSync(responseDir, { recursive: true });
+      const responseFile = path.join(responseDir, `${data.responseId}.json`);
+      if (!fs.existsSync(RCLONE_CONF_PATH)) {
+        fs.writeFileSync(
+          responseFile,
+          JSON.stringify({ error: 'GDrive not configured. rclone.conf missing on host.' }),
+        );
+        break;
+      }
+      // Resolve local path from the group's directory on host
+      const groupDir = resolveGroupFolderPath(sourceGroup);
+      const localSource = path.resolve(groupDir, data.localFile);
+      if (!localSource.startsWith(groupDir + path.sep) && localSource !== groupDir) {
+        fs.writeFileSync(
+          responseFile,
+          JSON.stringify({ error: 'Invalid local path: must be within group directory' }),
+        );
+        break;
+      }
+      if (!fs.existsSync(localSource)) {
+        fs.writeFileSync(
+          responseFile,
+          JSON.stringify({ error: `File not found: ${data.localFile}` }),
+        );
+        break;
+      }
+      try {
+        await uploadFile(localSource, data.remotePath);
+        fs.writeFileSync(responseFile, JSON.stringify({ result: { uploaded: data.remotePath } }));
+      } catch (err) {
+        fs.writeFileSync(
+          responseFile,
+          JSON.stringify({
+            error: err instanceof Error ? err.message : String(err),
+          }),
+        );
+      }
+      break;
+    }
 
     default:
       logger.warn({ type: data.type }, 'Unknown IPC task type');

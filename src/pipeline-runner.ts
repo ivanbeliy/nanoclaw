@@ -12,10 +12,12 @@ import fs from 'fs';
 import path from 'path';
 import { parse as parseYaml } from 'yaml';
 
-import { DATA_DIR } from './config.js';
+import { DATA_DIR, GROUPS_DIR } from './config.js';
 import { runContainerAgent } from './container-runner.js';
 import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
+
+const SAFE_NAME_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
 
 export interface PipelineAgent {
   role?: string;
@@ -41,6 +43,61 @@ export interface PipelineRunOptions {
   params: Record<string, string>;
   chatJid: string;
   onStatus: (message: string) => Promise<void>;
+  sourceGroup?: string;
+}
+
+/**
+ * Resolve a pipeline YAML path: group-local first, then system-wide.
+ */
+function resolvePipelinePath(
+  name: string,
+  sourceGroup?: string,
+): string | null {
+  if (!SAFE_NAME_PATTERN.test(name)) return null;
+
+  // Check group-local pipelines first
+  if (sourceGroup) {
+    const groupPath = path.join(
+      GROUPS_DIR,
+      sourceGroup,
+      'pipelines',
+      `${name}.yaml`,
+    );
+    if (fs.existsSync(groupPath)) return groupPath;
+  }
+
+  // Fall back to system pipelines
+  const systemPath = path.join(DATA_DIR, 'system', 'pipelines', `${name}.yaml`);
+  if (fs.existsSync(systemPath)) return systemPath;
+
+  return null;
+}
+
+/**
+ * Resolve a role definition path: group-local first, then system-wide.
+ */
+function resolveRolePath(
+  name: string,
+  sourceGroup?: string,
+): string | null {
+  if (!SAFE_NAME_PATTERN.test(name)) return null;
+
+  // Check group-local roles first
+  if (sourceGroup) {
+    const groupPath = path.join(
+      GROUPS_DIR,
+      sourceGroup,
+      'roles',
+      `${name}.md`,
+    );
+    if (fs.existsSync(groupPath)) return groupPath;
+  }
+
+  // Fall back to system roles
+  const systemPath = path.join(DATA_DIR, 'system', 'roles', `${name}.md`);
+  if (fs.existsSync(systemPath)) return systemPath;
+
+  return null;
 }
 
 /**
@@ -59,6 +116,7 @@ async function runPipelineAgent(
   workDir: string,
   params: Record<string, string>,
   chatJid: string,
+  sourceGroup?: string,
 ): Promise<{ status: 'success' | 'error'; result: string | null }> {
   const prompt = interpolate(agent.prompt, params);
   const folder = `pipeline-${agent.group_suffix}`;
@@ -70,11 +128,11 @@ async function runPipelineAgent(
     /* ignore */
   }
 
-  // Load role definition if specified
+  // Load role definition if specified (group-local first, then system)
   let roleContext = '';
   if (agent.role) {
-    const rolePath = path.join(DATA_DIR, 'system', 'roles', `${agent.role}.md`);
-    if (fs.existsSync(rolePath)) {
+    const rolePath = resolveRolePath(agent.role, sourceGroup);
+    if (rolePath) {
       roleContext = `\n\n## Your Role\n${fs.readFileSync(rolePath, 'utf-8')}\n\n`;
     }
   }
@@ -124,17 +182,13 @@ async function runPipelineAgent(
  * Execute a full pipeline.
  */
 export async function runPipeline(opts: PipelineRunOptions): Promise<void> {
-  const { pipelineName, projectName, params, chatJid, onStatus } = opts;
+  const { pipelineName, projectName, params, chatJid, onStatus, sourceGroup } =
+    opts;
 
-  // Load pipeline definition
-  const pipelinePath = path.join(
-    DATA_DIR,
-    'system',
-    'pipelines',
-    `${pipelineName}.yaml`,
-  );
-  if (!fs.existsSync(pipelinePath)) {
-    await onStatus(`Pipeline "${pipelineName}" not found at ${pipelinePath}`);
+  // Resolve pipeline path (group-local first, then system)
+  const pipelinePath = resolvePipelinePath(pipelineName, sourceGroup);
+  if (!pipelinePath) {
+    await onStatus(`Pipeline "${pipelineName}" not found`);
     return;
   }
 
@@ -151,6 +205,13 @@ export async function runPipeline(opts: PipelineRunOptions): Promise<void> {
   // Ensure project repo exists
   const projectDir = path.join(DATA_DIR, 'projects', projectName);
   if (!fs.existsSync(path.join(projectDir, '.git'))) {
+    // Non-main groups cannot auto-create projects — must exist already
+    if (sourceGroup) {
+      await onStatus(
+        `Project "${projectName}" does not exist. Ask the main group to create it with init_project.`,
+      );
+      return;
+    }
     fs.mkdirSync(projectDir, { recursive: true });
     execSync(
       'git init && git config user.name "nanoclaw" && git config user.email "agent@nanoclaw.local"',
@@ -217,7 +278,14 @@ export async function runPipeline(opts: PipelineRunOptions): Promise<void> {
       // Run all agents in parallel
       const results = await Promise.allSettled(
         worktrees.map(({ agent, wtPath }) =>
-          runPipelineAgent(agent, projectDir, wtPath, params, chatJid),
+          runPipelineAgent(
+            agent,
+            projectDir,
+            wtPath,
+            params,
+            chatJid,
+            sourceGroup,
+          ),
         ),
       );
 
@@ -281,6 +349,7 @@ export async function runPipeline(opts: PipelineRunOptions): Promise<void> {
           projectDir,
           params,
           chatJid,
+          sourceGroup,
         );
         logger.info(
           { agent: agent.group_suffix, status: result.status },

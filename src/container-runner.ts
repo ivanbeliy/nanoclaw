@@ -190,6 +190,7 @@ function buildVolumeMounts(
   fs.mkdirSync(path.join(groupIpcDir, 'messages'), { recursive: true });
   fs.mkdirSync(path.join(groupIpcDir, 'tasks'), { recursive: true });
   fs.mkdirSync(path.join(groupIpcDir, 'input'), { recursive: true });
+  fs.mkdirSync(path.join(groupIpcDir, 'responses'), { recursive: true });
   mounts.push({
     hostPath: groupIpcDir,
     containerPath: '/workspace/ipc',
@@ -345,8 +346,9 @@ export async function runContainerAgent(
 
   const mounts = buildVolumeMounts(group, input.isMain);
 
-  // For OAuth mode, sync host credentials into the container's .claude dir
-  // so the SDK can read them directly. The .claude dir is already bind-mounted.
+  // For OAuth mode, sync the freshest credentials into the container's .claude dir.
+  // OAuth refresh tokens are single-use — once any container refreshes, the host's
+  // copy becomes stale. We scan all sessions and pick the newest valid credentials.
   if (detectAuthMode() === 'oauth') {
     const hostCreds = path.join(
       process.env.HOME || '/root',
@@ -361,9 +363,46 @@ export async function runContainerAgent(
       '.credentials.json',
     );
     try {
-      if (fs.existsSync(hostCreds)) {
-        fs.copyFileSync(hostCreds, containerCreds);
-        // Container runs as node (uid 1000) — make the file readable
+      let bestCredsPath = hostCreds;
+      let bestExpiry = 0;
+
+      const checkCreds = (filePath: string) => {
+        try {
+          if (fs.existsSync(filePath)) {
+            const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+            const expiry = data?.claudeAiOauth?.expiresAt || 0;
+            if (expiry > bestExpiry) {
+              bestExpiry = expiry;
+              bestCredsPath = filePath;
+            }
+          }
+        } catch { /* skip unreadable files */ }
+      };
+
+      // Check host credentials
+      checkCreds(hostCreds);
+
+      // Check all session directories for fresher credentials
+      const sessionsDir = path.join(DATA_DIR, 'sessions');
+      if (fs.existsSync(sessionsDir)) {
+        for (const sessionFolder of fs.readdirSync(sessionsDir)) {
+          const sessionCredFile = path.join(sessionsDir, sessionFolder, '.claude', '.credentials.json');
+          checkCreds(sessionCredFile);
+        }
+      }
+
+      if (bestCredsPath && fs.existsSync(bestCredsPath)) {
+        // Copy freshest credentials to the target container
+        if (bestCredsPath !== containerCreds) {
+          fs.copyFileSync(bestCredsPath, containerCreds);
+        }
+        // Also sync back to host so future containers get the latest
+        if (bestCredsPath !== hostCreds) {
+          try {
+            fs.copyFileSync(bestCredsPath, hostCreds);
+            logger.info({ source: bestCredsPath }, 'Synced fresher OAuth credentials back to host');
+          } catch { /* host path may not be writable */ }
+        }
         fs.chownSync(containerCreds, 1000, 1000);
         fs.chmodSync(containerCreds, 0o600);
       }
